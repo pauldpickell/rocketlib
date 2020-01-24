@@ -1,8 +1,8 @@
 -----------------------------------------------------
--- Minetest :: MapBridge Toolkit (mbridge)
+-- Minetest :: RocketLib Toolkit (rocketlib)
 --
 -- See README.txt for licensing and release notes.
--- Copyright (c) 2018-2019, Leslie E. Krause
+-- Copyright (c) 2018-2020, Leslie E. Krause
 -----------------------------------------------------
 
 package.cpath = package.cpath .. ";/usr/local/lib/lua/5.1/?.so"
@@ -14,16 +14,25 @@ local sqlite3 = require( "lsqlite3complete" )		-- https://luarocks.org/modules/d
 -- Conversion Routines
 -----------------------------
 
+local floor = math.floor
+local ceil = math.ceil
+local max = math.max
+local min = math.min
+local byte = string.byte
+local match = string.match
+local find = string.find
+local sub = string.sub
+
 local function to_signed( val )
 	return val < 2048 and val or val - 2 * 2048
 end
 
-function decode_pos( index )
-	local x = to_signed( index % 4096 )
-	index = math.floor( ( index - x ) / 4096 )
-	local y = to_signed( index % 4096 )
-	index = math.floor( ( index - y ) / 4096 )
-	local z = to_signed( index % 4096 )
+function decode_pos( idx )
+	local x = to_signed( idx % 4096 )
+	idx = floor( ( idx - x ) / 4096 )
+	local y = to_signed( idx % 4096 )
+	idx = floor( ( idx - y ) / 4096 )
+	local z = to_signed( idx % 4096 )
 	return { x = x, y = y, z = z }
 end
 
@@ -31,20 +40,49 @@ function encode_pos( pos )
 	return pos.x + pos.y * 4096 + pos.z * 16777216
 end
 
+function decode_node_pos( node_idx, idx )
+	local pos = idx and decode_pos( idx ) or { x = 0, y = 0, z = 0 }
+	local node_pos = { }
+
+	node_idx = node_idx - 1		-- correct for one-based indexing used in node_list
+
+	node_pos.x = ( node_idx % 16 ) + pos.x * 16
+	node_idx = floor( node_idx / 16 )
+	node_pos.y = ( node_idx % 16 ) + pos.y * 16
+	node_idx = floor( node_idx / 16 )
+	node_pos.z = ( node_idx % 16 ) + pos.z * 16
+
+	return node_pos
+end
+
+function encode_node_pos( node_pos )
+	local pos = {
+		x = floor( node_pos.x / 16 ),
+		y = floor( node_pos.y / 16 ),
+		z = floor( node_pos.z / 16 )
+	}
+	local x = node_pos.x % 16
+	local y = node_pos.x % 16
+	local z = node_pos.x % 16
+	return x + y * 16 + z * 256, encode_pos( pos )
+end
+
+local function is_match( text, glob )
+	-- use array for captures
+	_ = { match( text, glob ) }
+	return #_ > 0 and _ or nil
+end
+
 -----------------------------
 -- Debugging Routines
 -----------------------------
 
 function pos_to_string( pos )
-	return string.format( "%d,%d,%d", pos.x, pos.y, pos.z )
-end
-
-function index_to_string( index )
-	return pos_to_string( decode_pos( index ) )
+	return string.format( "(%d,%d,%d)", pos.x, pos.y, pos.z )
 end
 
 function dump( buffer )
-	for i = 1, math.ceil( #buffer / 16 ) * 16 do
+	for i = 1, ceil( #buffer / 16 ) * 16 do
 		if ( i - 1 ) % 16 == 0 then io.write( string.format( '%08X   ', i - 1 ) ) end
 		io.write( i > #buffer and '   ' or string.format( '%02x ', buffer:byte( i ) ) )
 		if i % 8 == 0 then io.write( ' ' ) end
@@ -72,31 +110,31 @@ function BlobReader( input )
 	-- public methods
 
 	self.read_u8 = function ( )
-		local output = string.byte( input, idx )
+		local output = byte( input, idx )
 		idx = idx + 1
 		return output
 	end
 	self.read_u16 = function ( )
 		-- 16-bit unsigned integer
-		local output = string.byte( input, idx ) * 256 + string.byte( input, idx + 1 )
+		local output = byte( input, idx ) * 256 + byte( input, idx + 1 )
 		idx = idx + 2
 		return output
 	end
 	self.read_u32 = function ( )
 		-- 32-bit unsigned integer
-		local output = string.byte( input, idx ) * 16777216 + string.byte( input, idx + 1 ) * 65536 + string.byte( input, idx + 2 ) * 256 + string.byte( input, idx + 3 )
+		local output = byte( input, idx ) * 16777216 + byte( input, idx + 1 ) * 65536 + byte( input, idx + 2 ) * 256 + byte( input, idx + 3 )
 		idx = idx + 4
 		return output
 	end
 	self.read_s16 = function ( )
 		-- 16-bit signed integer
-		local output = u16_to_signed( string.byte( input, idx ) * 256 + string.byte( input, idx + 1 ) )
+		local output = u16_to_signed( byte( input, idx ) * 256 + byte( input, idx + 1 ) )
 		idx = idx + 2
 		return output
 	end
 	self.read_s32 = function ( )
 		-- 32-bit signed integer
-		local output = u32_to_signed( string.byte( input, idx ) * 16777216 + string.byte( input, idx + 1 ) * 65536 + string.byte( input, idx + 2 ) * 256 + string.byte( input, idx + 3 ) )
+		local output = u32_to_signed( byte( input, idx ) * 16777216 + byte( input, idx + 1 ) * 65536 + byte( input, idx + 2 ) * 256 + byte( input, idx + 3 ) )
 		idx = idx + 4
 		return output
 	end
@@ -109,26 +147,58 @@ function BlobReader( input )
 		return output
 	end
 	self.read_zlib = function ( )
-		output, is_eof, bytes_in, bytes_out = zlib.inflate( )( string.sub( input, idx ) )
+		output, is_eof, bytes_in, bytes_out = zlib.inflate( )( sub( input, idx ) )
 		idx = idx + bytes_in
 		return output
 	end
 	self.read_string = function ( len )
 		if not len then
 			-- multiline string
-			local len = string.find( input, "\n", idx ) - idx
-			local output = string.sub( input, idx, idx + len - 1 )
+			local len = find( input, "\n", idx ) - idx
+			local output = sub( input, idx, idx + len - 1 )
 			idx = idx + len + 1
 			return output
 		else
 			-- non-terminated string
-			local output = string.sub( input, idx, idx + len - 1 )
+			local output = sub( input, idx, idx + len - 1 )
 			idx = idx + len
 			return output
 		end
 	end
 	return self
 end
+
+-----------------------------
+-- MetaDataRef Class
+-----------------------------
+
+--[[function MetaDataRef( block )
+        -- usage: MetaDataRef( block ).get_string( 5, "infotext" )
+        -- same as block.get_nodemeta_map( )[ 5 ].fields.infotext
+        -- first is more efficient for multiple lookups since it caches nodemeta
+	-- but second if fine for just a single lookup
+
+	local self = { }
+        local nodemeta_map = block.get_nodemeta_map( )
+
+	self.exists = function ( off, key )
+		return nodemeta_map[ off ].fields[ key ] ~= nil
+	end
+        self.get_string = function ( off, key )
+		return tostring( nodemeta_map[ off ].fields[ key ] ) or ""
+        end
+        self.get_int = function ( key )
+		return tonumber( nodemeta_map[ off ].fields[ key ] ) or 0
+	end
+        self.get_float = function ( key )
+		return tonumber( nodemeta_map[ off ].fields[ key ] ) or 0
+        end
+        self.to_table = function ( )
+                return { fields = fields, inventory = inventory }
+        end
+
+	return self
+end]]
 
 -----------------------------
 -- Deserializer Routines
@@ -157,14 +227,14 @@ local function parse_nodemeta_map( blob )
 
 	local version = p.read_u8( )
 	if version == 0 then
-		return data
+		return this
 	elseif version > 3 then
 		error( "Unsupported node_metadata version, aborting!" )
 	end
 
 	local node_total = p.read_u16( )
 	for node_count = 1, node_total do
-		local pos = p.read_u16( )
+		local pos = p.read_u16( ) + 1		-- use one-based indexing to correspond with node_list array
 		local var_total = p.read_u32( )
 
 		this[ pos ] = { fields = { }, inventory = { }, is_private = false }
@@ -179,12 +249,15 @@ local function parse_nodemeta_map( blob )
 		end
 		for inv_count = 1, 127 do
 			local text = p.read_string( )
+
 			if text == "EndInventory" then
 				break
 			end
 
-			if string.is_match( text, "^Item ([a-zA-Z_]+:[a-zA-Z_]+)$" ) or string.is_match( text, "^Item ([a-zA-Z_]+:[a-zA-Z_]+) (%d+)" ) then
+			if is_match( text, "^Item ([a-zA-Z0-9_]+:[a-zA-Z_]+)$" ) or is_match( text, "^Item ([a-zA-Z0-9_]+:[a-zA-Z0-9_]+) (%d+)" ) then
 				table.insert( this[ pos ].inventory, { item_name = _[ 1 ], item_count = tonumber( _[ 2 ] ) or 1 } )
+			elseif text == "Empty" then
+				table.insert( this[ pos ].inventory, { } )	-- empty item stack
 			end
 		end
 	end
@@ -287,10 +360,14 @@ function MapBlock( blob, is_preview, get_checksum )
 
 	----------
 
+	-- TODO: parse timers
+
+	----------
+
 	self.get_node_list = function ( ) 
 		return parse_node_list( node_list_raw )
 	end
-	self.get_nodemeta_list = function ( )
+	self.get_nodemeta_map = function ( )
 		return parse_nodemeta_map( nodemeta_list_raw )
 	end
 
@@ -305,12 +382,12 @@ function MapArea( pos1, pos2 )
         local self = { }
 
 	-- presort positions and clamp to designated boundaries
-	local x1 = math.max( math.min( pos1.x, pos2.x ), -2048 )
-	local y1 = math.max( math.min( pos1.y, pos2.y ), -2048 )
-	local z1 = math.max( math.min( pos1.z, pos2.z ), -2048 )
-	local x2 = math.min( math.max( pos1.x, pos2.x ), 2048 )
-	local y2 = math.min( math.max( pos1.y, pos2.y ), 2048 )
-	local z2 = math.min( math.max( pos1.z, pos2.z ), 2048 )
+	local x1 = max( min( pos1.x, pos2.x ), -2048 )
+	local y1 = max( min( pos1.y, pos2.y ), -2048 )
+	local z1 = max( min( pos1.z, pos2.z ), -2048 )
+	local x2 = min( max( pos1.x, pos2.x ), 2048 )
+	local y2 = min( max( pos1.y, pos2.y ), 2048 )
+	local z2 = min( max( pos1.z, pos2.z ), 2048 )
 
 	self.get_min_pos = function ( )
 		return { x = x1, y = y1, z = z1 }
@@ -328,11 +405,11 @@ function MapArea( pos1, pos2 )
 		local x = to_signed( idx % 4096 )
 		if x < x1 or x > x2 then return false end
 
-		idx = math.floor( ( idx - x ) / 4096 )
+		idx = floor( ( idx - x ) / 4096 )
 		local y = to_signed( idx % 4096 )
 		if y < y1 or y > y2 then return false end
 
-		idx = math.floor( ( idx - y ) / 4096 )
+		idx = floor( ( idx - y ) / 4096 )
 		local z = to_signed( idx % 4096 )
 		if z < z1 or z > z2 then return false end
 
@@ -380,6 +457,7 @@ function MapDatabase( path, is_preview, is_summary )
 	local self = { }
 	local map_db = sqlite3.open( path, sqlite3.OPEN_READONLY )
 	local cache_db
+	local init_checksum = zlib.crc32
 
 	if not map_db then
 		error( "Cannot open map database, aborting!" )
@@ -402,6 +480,10 @@ function MapDatabase( path, is_preview, is_summary )
 
 	self.disable_summary = function ( )
 		is_summary = false
+	end
+
+	self.change_algorithm = function ( algorithm )
+		init_checksum = ( { ["crc32"] = zlib.crc32, ["adler32"] = zlib.alder32 } )[ algorithm ]
 	end
 
 	self.create_cache = function ( use_memory, on_step )
@@ -464,7 +546,7 @@ function MapDatabase( path, is_preview, is_summary )
 		stmt:reset( )
 
 		if is_summary then
-			get_checksum = zlib.crc32( )
+			get_checksum = init_checksum( )
 		end
 
                 return function ( )
@@ -473,7 +555,7 @@ function MapDatabase( path, is_preview, is_summary )
 			if on_step then on_step( ) end
 
 			local index = stmt:get_value( 0 )
-			local block = MapBlock( stmt:get_value( 1 ), is_preview, get_checksum or zlib.crc32( ) )
+			local block = MapBlock( stmt:get_value( 1 ), is_preview, get_checksum or init_checksum( ) )
 			return index, block
 		end
 	end
@@ -491,7 +573,7 @@ function MapDatabase( path, is_preview, is_summary )
 		stmt:bind_values( min_pos.x, max_pos.x, min_pos.y, max_pos.y, min_pos.z, max_pos.z )
 
 		if is_summary then
-			get_checksum = zlib.crc32( )
+			get_checksum = init_checksum( )
 		end
 
 		return function ( )
@@ -502,7 +584,7 @@ function MapDatabase( path, is_preview, is_summary )
 			if on_step then on_step( ) end
 
 			local index = stmt:get_value( 0 )
-			local block = self.get_mapblock( index, get_checksum or zlib.crc32( ) )
+			local block = self.get_mapblock( index, get_checksum or init_checksum( ) )
 			return index, block
 		end
 	end
@@ -541,13 +623,23 @@ function MapDatabase( path, is_preview, is_summary )
 		return stmt:step( ) == sqlite3.ROW
 	end
 
-	self.get_mapblock = function ( index, get_checksum )
+	self.get_mapblock = function ( index )
 		local stmt = map_select_pos
 
 		stmt:reset( )
 		stmt:bind_values( index )
 		if stmt:step( ) == sqlite3.ROW then
-			return MapBlock( stmt:get_value( 0 ), is_preview, get_checksum or zlib.crc32( ) )
+			return MapBlock( stmt:get_value( 0 ), is_preview, init_checksum( ) )
+		end
+	end
+
+	self.get_mapblock_raw = function ( index )
+		local stmt = map_select_pos
+
+		stmt:reset( )
+		stmt:bind_values( index )
+		if stmt:step( ) == sqlite3.ROW then
+			return stmt:get_value( 0 )
 		end
 	end
 
